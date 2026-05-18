@@ -1,6 +1,11 @@
-
 import { useState, useEffect, useMemo, useRef, useCallback, memo } from "react";
 import { Sun, Sunset, Moon, Flame, BookOpen, Users, X, Plus, Loader2, ChevronLeft, ChevronRight, Heart, Check, Calendar, Clock } from "lucide-react";
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(
+  import.meta.env.VITE_SUPABASE_URL,
+  import.meta.env.VITE_SUPABASE_KEY
+);
 
 const EMPTY = Object.freeze([]);
 const PT_DAYS = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
@@ -35,29 +40,6 @@ const ALL_DAYS = (() => {
 
 const fmt = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const fmtShort = d => `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}`;
-
-// ============================================================
-// Camada de storage com fallback para localStorage
-// (Mantém compatibilidade com window.storage do Claude
-//  e funciona em qualquer ambiente fora do Claude.ai)
-// ============================================================
-const storage = {
-  async get(key) {
-    if (typeof window !== "undefined" && window.storage?.get) {
-      try {
-        const r = await window.storage.get(key, true);
-        return r?.value ?? null;
-      } catch { return null; }
-    }
-    try { return localStorage.getItem(key); } catch { return null; }
-  },
-  async set(key, value) {
-    if (typeof window !== "undefined" && window.storage?.set) {
-      try { await window.storage.set(key, value, true); return; } catch {}
-    }
-    try { localStorage.setItem(key, value); } catch {}
-  }
-};
 
 function segPath(cx, cy, oR, iR, h) {
   const sa = (h / 24) * 2 * Math.PI - Math.PI / 2, ea = ((h + 1) / 24) * 2 * Math.PI - Math.PI / 2;
@@ -142,10 +124,10 @@ const PeriodCell = memo(function PeriodCell({ dKey, period, names, onAdd, onRemo
       </div>
       {names.length > 0 ? (
         <div className="flex flex-wrap gap-1.5 mb-3">
-          {names.map((name, i) => (
+          {names.map((n, i) => (
             <span key={i} className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium ${s.chip}`}>
-              {name}
-              <button onClick={() => onRemove(dKey, period.id, i)} className="rounded-full p-0.5 hover:bg-black/10 transition-colors" aria-label="Remover">
+              {n.name}
+              <button onClick={() => onRemove(n.id, "cal")} className="rounded-full p-0.5 hover:bg-black/10 transition-colors" aria-label="Remover">
                 <X className="w-3 h-3" />
               </button>
             </span>
@@ -212,10 +194,10 @@ const HourRow = memo(function HourRow({ dKey, hour, names, onAdd, onRemove, isHi
         <div className="flex-1 min-w-0">
           {names.length > 0 && (
             <div className="flex flex-wrap gap-1 mb-1.5">
-              {names.map((name, i) => (
+              {names.map((n, i) => (
                 <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-stone-100 text-stone-800 border border-stone-200">
-                  {name}
-                  <button onClick={() => onRemove(dKey, hour, i)} className="rounded-full p-0.5 hover:bg-black/10 transition-colors" aria-label="Remover">
+                  {n.name}
+                  <button onClick={() => onRemove(n.id, "clock")} className="rounded-full p-0.5 hover:bg-black/10 transition-colors" aria-label="Remover">
                     <X className="w-3 h-3" />
                   </button>
                 </span>
@@ -255,77 +237,71 @@ export default function App() {
   const [month, setMonth] = useState(0);
   const [clockDay, setClockDay] = useState(0);
   const [hi, setHi] = useState(null);
-  const [signups, setSignups] = useState({});
-  const [cs, setCs] = useState({});
+  const [signups, setSignups] = useState([]);
+  const [cs, setCs] = useState([]);
   const [loading, setLoading] = useState(true);
-
   const hourRefs = useRef({});
-  const signupsRef = useRef(signups);
-  const csRef = useRef(cs);
   const hiTimerRef = useRef(null);
-  const persistCalTimer = useRef(null);
-  const persistClockTimer = useRef(null);
-  signupsRef.current = signups;
-  csRef.current = cs;
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const v1 = await storage.get("ruah-signups-2026");
-      if (!cancelled && v1) { try { setSignups(JSON.parse(v1)); } catch {} }
-      const v2 = await storage.get("ruah-clock-2026");
-      if (!cancelled && v2) { try { setCs(JSON.parse(v2)); } catch {} }
-      if (!cancelled) setLoading(false);
+      const [{ data: s }, { data: c }] = await Promise.all([
+        supabase.from("signups").select("*"),
+        supabase.from("clock_signups").select("*"),
+      ]);
+      if (!cancelled) {
+        setSignups(s || []);
+        setCs(c || []);
+        setLoading(false);
+      }
     })();
-    return () => { cancelled = true; };
+
+    const sub1 = supabase.channel("signups-changes")
+      .on("postgres_changes", { event: "*", schema: "public", table: "signups" }, () => {
+        supabase.from("signups").select("*").then(({ data }) => { if (data) setSignups(data); });
+      }).subscribe();
+
+    const sub2 = supabase.channel("clock-changes")
+      .on("postgres_changes", { event: "*", schema: "public", table: "clock_signups" }, () => {
+        supabase.from("clock_signups").select("*").then(({ data }) => { if (data) setCs(data); });
+      }).subscribe();
+
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(sub1);
+      supabase.removeChannel(sub2);
+    };
   }, []);
 
-  const schedulePersistCal = useCallback((data) => {
-    if (persistCalTimer.current) clearTimeout(persistCalTimer.current);
-    persistCalTimer.current = setTimeout(() => {
-      storage.set("ruah-signups-2026", JSON.stringify(data));
-    }, 150);
-  }, []);
-  const schedulePersistClock = useCallback((data) => {
-    if (persistClockTimer.current) clearTimeout(persistClockTimer.current);
-    persistClockTimer.current = setTimeout(() => {
-      storage.set("ruah-clock-2026", JSON.stringify(data));
-    }, 150);
-  }, []);
-
-  const addCal = useCallback((dKey, pid, name) => {
+  const addCal = useCallback(async (dKey, pid, name) => {
     const trimmed = name.trim();
     if (!trimmed) return;
-    const k = `${dKey}:${pid}`;
-    const next = { ...signupsRef.current, [k]: [...(signupsRef.current[k] || EMPTY), trimmed] };
-    setSignups(next);
-    schedulePersistCal(next);
-  }, [schedulePersistCal]);
+    const { data } = await supabase.from("signups").insert({ day_key: dKey, period: pid, name: trimmed }).select().single();
+    if (data) setSignups(prev => [...prev, data]);
+  }, []);
 
-  const remCal = useCallback((dKey, pid, i) => {
-    const k = `${dKey}:${pid}`;
-    const arr = signupsRef.current[k] || EMPTY;
-    const next = { ...signupsRef.current, [k]: arr.filter((_, j) => j !== i) };
-    setSignups(next);
-    schedulePersistCal(next);
-  }, [schedulePersistCal]);
+  const remCal = useCallback(async (id) => {
+    await supabase.from("signups").delete().eq("id", id);
+    setSignups(prev => prev.filter(r => r.id !== id));
+  }, []);
 
-  const addClock = useCallback((dKey, h, name) => {
+  const addClock = useCallback(async (dKey, h, name) => {
     const trimmed = name.trim();
     if (!trimmed) return;
-    const k = `${dKey}:${h}`;
-    const next = { ...csRef.current, [k]: [...(csRef.current[k] || EMPTY), trimmed] };
-    setCs(next);
-    schedulePersistClock(next);
-  }, [schedulePersistClock]);
+    const { data } = await supabase.from("clock_signups").insert({ day_key: dKey, hour: h, name: trimmed }).select().single();
+    if (data) setCs(prev => [...prev, data]);
+  }, []);
 
-  const remClock = useCallback((dKey, h, i) => {
-    const k = `${dKey}:${h}`;
-    const arr = csRef.current[k] || EMPTY;
-    const next = { ...csRef.current, [k]: arr.filter((_, j) => j !== i) };
-    setCs(next);
-    schedulePersistClock(next);
-  }, [schedulePersistClock]);
+  const remClock = useCallback(async (id) => {
+    await supabase.from("clock_signups").delete().eq("id", id);
+    setCs(prev => prev.filter(r => r.id !== id));
+  }, []);
+
+  const handleRemove = useCallback((id, type) => {
+    if (type === "cal") remCal(id);
+    else remClock(id);
+  }, [remCal, remClock]);
 
   const onHour = useCallback((h) => {
     setHi(h);
@@ -337,33 +313,31 @@ export default function App() {
 
   const setHourRef = useCallback((h) => (el) => { hourRefs.current[h] = el; }, []);
 
-  useEffect(() => () => {
-    if (hiTimerRef.current) clearTimeout(hiTimerRef.current);
-    if (persistCalTimer.current) clearTimeout(persistCalTimer.current);
-    if (persistClockTimer.current) clearTimeout(persistClockTimer.current);
-  }, []);
-
   const monthDays = useMemo(() => ALL_DAYS.filter(d => d.getMonth() === MONTHS[month].idx), [month]);
   const ckDay = CLOCK_DAYS[clockDay];
   const ckKey = ckDay ? fmt(ckDay) : "";
 
-  const hourCounts = useMemo(() => {
-    const out = new Array(24);
-    for (let h = 0; h < 24; h++) out[h] = (cs[`${ckKey}:${h}`] || EMPTY).length;
-    return out;
-  }, [cs, ckKey]);
+  const getCalNames = useCallback((dKey, pid) =>
+    signups.filter(r => r.day_key === dKey && r.period === pid), [signups]);
 
-  const stats = useMemo(() => {
-    let cn = 0, cf = 0;
-    for (const k in signups) { const a = signups[k]; if (a && a.length > 0) { cn += a.length; cf++; } }
-    let kn = 0, kf = 0;
-    for (const k in cs) { const a = cs[k]; if (a && a.length > 0) { kn += a.length; kf++; } }
-    return { calNames: cn, calFilled: cf, calTotal: ALL_DAYS.length * 3, clockNames: kn, clockFilled: kf, clockTotal: CLOCK_DAYS.length * 24, total: cn + kn };
-  }, [signups, cs]);
+  const getClockNames = useCallback((dKey, h) =>
+    cs.filter(r => r.day_key === dKey && r.hour === h), [cs]);
+
+  const hourCounts = useMemo(() =>
+    Array.from({ length: 24 }, (_, h) => getClockNames(ckKey, h).length),
+    [cs, ckKey, getClockNames]);
+
+  const stats = useMemo(() => ({
+    total: signups.length + cs.length,
+    calFilled: new Set(signups.map(r => `${r.day_key}:${r.period}`)).size,
+    calTotal: ALL_DAYS.length * 3,
+    clockFilled: new Set(cs.map(r => `${r.day_key}:${r.hour}`)).size,
+    clockTotal: CLOCK_DAYS.length * 24,
+    clockNames: cs.length,
+  }), [signups, cs]);
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-stone-50 via-amber-50/30 to-stone-50">
-      {/* HERO */}
       <header className="relative overflow-hidden bg-gradient-to-br from-stone-900 via-stone-800 to-amber-950 text-stone-100">
         <div className="absolute inset-0 opacity-10" style={{ backgroundImage: "radial-gradient(circle at 20% 20%,#f59e0b,transparent 50%),radial-gradient(circle at 80% 80%,#ea580c,transparent 50%)" }} />
         <div className="relative max-w-5xl mx-auto px-6 py-14 text-center">
@@ -383,7 +357,6 @@ export default function App() {
         </div>
       </header>
 
-      {/* INFO CARDS */}
       <section className="max-w-5xl mx-auto px-6 py-10">
         <div className="grid md:grid-cols-2 gap-5">
           <div className="bg-white border border-stone-200 rounded-2xl p-6 shadow-sm">
@@ -430,7 +403,6 @@ export default function App() {
         </div>
       </section>
 
-      {/* STATS */}
       <section className="max-w-5xl mx-auto px-6 pb-8">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <StatCard label="Total de intercessores" value={stats.total} gradient="from-amber-500 to-amber-600" Icon={Users} />
@@ -440,7 +412,6 @@ export default function App() {
         </div>
       </section>
 
-      {/* TABS */}
       <section className="max-w-5xl mx-auto px-6 pb-6">
         <div className="bg-white border border-stone-200 rounded-2xl p-2 shadow-sm overflow-x-auto">
           <div className="flex items-center gap-1 min-w-max">
@@ -461,7 +432,6 @@ export default function App() {
         </div>
       </section>
 
-      {/* CONTENT */}
       <section className="max-w-5xl mx-auto px-6 pb-16">
         {loading ? (
           <div className="flex items-center justify-center py-20 text-stone-500">
@@ -473,10 +443,10 @@ export default function App() {
               const dKey = fmt(day);
               return (
                 <DayCard key={dKey} day={day} dKey={dKey}
-                  manhaNames={signups[`${dKey}:manha`] || EMPTY}
-                  tardeNames={signups[`${dKey}:tarde`] || EMPTY}
-                  noiteNames={signups[`${dKey}:noite`] || EMPTY}
-                  onAdd={addCal} onRemove={remCal} />
+                  manhaNames={getCalNames(dKey, "manha")}
+                  tardeNames={getCalNames(dKey, "tarde")}
+                  noiteNames={getCalNames(dKey, "noite")}
+                  onAdd={addCal} onRemove={handleRemove} />
               );
             })}
           </div>
@@ -503,7 +473,6 @@ export default function App() {
                 </button>
               </div>
             </div>
-
             <div className="grid md:grid-cols-2 gap-5">
               <div className="bg-white border border-stone-200 rounded-2xl p-5 shadow-sm">
                 <div className="text-center mb-3">
@@ -520,7 +489,6 @@ export default function App() {
                   <span className="flex items-center gap-1"><span className="w-3 h-3 rounded inline-block bg-indigo-500" /><span>Madrugada</span></span>
                 </div>
               </div>
-
               <div className="bg-white border border-stone-200 rounded-2xl shadow-sm overflow-hidden flex flex-col">
                 <div className="px-4 py-3 border-b border-stone-100 bg-stone-50 flex-shrink-0">
                   <h3 className="font-semibold text-sm text-stone-800">Inscrição por hora</h3>
@@ -529,8 +497,8 @@ export default function App() {
                 <div className="divide-y divide-stone-100 overflow-y-auto" style={{ maxHeight: 460 }}>
                   {Array.from({ length: 24 }, (_, h) => (
                     <HourRow key={h} dKey={ckKey} hour={h}
-                      names={cs[`${ckKey}:${h}`] || EMPTY}
-                      onAdd={addClock} onRemove={remClock}
+                      names={getClockNames(ckKey, h)}
+                      onAdd={addClock} onRemove={handleRemove}
                       isHighlighted={hi === h}
                       setRef={setHourRef(h)} />
                   ))}
@@ -541,7 +509,6 @@ export default function App() {
         )}
       </section>
 
-      {/* FOOTER */}
       <footer className="bg-stone-900 text-stone-300 py-10 px-6">
         <div className="max-w-3xl mx-auto text-center">
           <Flame className="w-8 h-8 text-amber-400 mx-auto mb-4" />
