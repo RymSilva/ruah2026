@@ -9,6 +9,7 @@ const supabase = createClient(
 
 const EMPTY = Object.freeze([]);
 const PT_DAYS = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
+const PT_DAYS_SHORT = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
 const MONTHS = [
   { name: "Maio", short: "Mai", idx: 4 },
   { name: "Junho", short: "Jun", idx: 5 },
@@ -48,6 +49,132 @@ function segPath(cx, cy, oR, iR, h) {
   const f = n => n.toFixed(2);
   return `M${f(i1.x)} ${f(i1.y)} L${f(o1.x)} ${f(o1.y)} A${oR} ${oR} 0 0 1 ${f(o2.x)} ${f(o2.y)} L${f(i2.x)} ${f(i2.y)} A${iR} ${iR} 0 0 0 ${f(i1.x)} ${f(i1.y)}Z`;
 }
+
+// ─── Calendar Overview ───────────────────────────────────────────────────────
+
+function CalendarOverview({ signups, onSelectDay }) {
+  const [viewMonth, setViewMonth] = useState(0);
+  const m = MONTHS[viewMonth];
+
+  // build grid for this month
+  const grid = useMemo(() => {
+    const firstDay = new Date(2026, m.idx, 1).getDay();
+    const daysInMonth = new Date(2026, m.idx + 1, 0).getDate();
+    const cells = [];
+    for (let i = 0; i < firstDay; i++) cells.push(null);
+    for (let d = 1; d <= daysInMonth; d++) {
+      const date = new Date(2026, m.idx, d);
+      const inRange = ALL_DAYS.some(ad => fmt(ad) === fmt(date));
+      cells.push({ date, inRange });
+    }
+    return cells;
+  }, [viewMonth]);
+
+  const coverageMap = useMemo(() => {
+    const map = {};
+    for (const s of signups) {
+      if (!map[s.day_key]) map[s.day_key] = new Set();
+      map[s.day_key].add(s.period);
+    }
+    return map;
+  }, [signups]);
+
+  const getCoverage = (date) => {
+    if (!date) return 0;
+    const key = fmt(date);
+    return coverageMap[key] ? coverageMap[key].size : 0;
+  };
+
+  const coverageColor = (date, inRange) => {
+    if (!inRange) return "bg-stone-100 text-stone-300 cursor-default";
+    const c = getCoverage(date);
+    if (c === 0) return "bg-white border border-stone-200 text-stone-700 hover:border-amber-400 cursor-pointer";
+    if (c === 1) return "bg-amber-100 border border-amber-200 text-amber-900 hover:border-amber-400 cursor-pointer";
+    if (c === 2) return "bg-orange-200 border border-orange-300 text-orange-900 hover:border-orange-400 cursor-pointer";
+    return "bg-amber-500 border border-amber-600 text-white hover:bg-amber-600 cursor-pointer";
+  };
+
+  const dotColors = (date) => {
+    if (!date) return [];
+    const key = fmt(date);
+    const periods = coverageMap[key] ? [...coverageMap[key]] : [];
+    return periods.map(p => p === "manha" ? "bg-amber-400" : p === "tarde" ? "bg-orange-500" : "bg-indigo-500");
+  };
+
+  return (
+    <div className="bg-white border border-stone-200 rounded-2xl shadow-sm overflow-hidden">
+      {/* month nav */}
+      <div className="flex items-center justify-between px-5 py-4 border-b border-stone-100">
+        <button
+          onClick={() => setViewMonth(v => Math.max(0, v - 1))}
+          disabled={viewMonth === 0}
+          className="p-1.5 rounded-lg hover:bg-stone-100 disabled:opacity-30 transition-colors"
+        >
+          <ChevronLeft className="w-4 h-4 text-stone-600" />
+        </button>
+        <div className="text-center">
+          <span className="font-serif font-bold text-stone-900">{m.name} 2026</span>
+          <p className="text-xs text-stone-400 mt-0.5">Visão geral de cobertura</p>
+        </div>
+        <button
+          onClick={() => setViewMonth(v => Math.min(MONTHS.length - 1, v + 1))}
+          disabled={viewMonth === MONTHS.length - 1}
+          className="p-1.5 rounded-lg hover:bg-stone-100 disabled:opacity-30 transition-colors"
+        >
+          <ChevronRight className="w-4 h-4 text-stone-600" />
+        </button>
+      </div>
+
+      {/* day headers */}
+      <div className="grid grid-cols-7 border-b border-stone-100">
+        {PT_DAYS_SHORT.map(d => (
+          <div key={d} className="text-center text-xs font-semibold text-stone-400 py-2">{d}</div>
+        ))}
+      </div>
+
+      {/* grid */}
+      <div className="grid grid-cols-7 gap-1 p-3">
+        {grid.map((cell, i) => {
+          if (!cell) return <div key={`empty-${i}`} />;
+          const { date, inRange } = cell;
+          const dots = dotColors(date);
+          const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+          return (
+            <button
+              key={i}
+              onClick={() => inRange && onSelectDay(date, viewMonth)}
+              className={`relative rounded-xl py-2 px-1 flex flex-col items-center transition-all ${coverageColor(date, inRange)} ${isWeekend && inRange ? "opacity-90" : ""}`}
+            >
+              <span className={`text-xs font-bold leading-none mb-1 ${!inRange ? "text-stone-300" : ""}`}>
+                {date.getDate()}
+              </span>
+              {dots.length > 0 && (
+                <div className="flex gap-0.5">
+                  {dots.map((c, j) => (
+                    <span key={j} className={`w-1.5 h-1.5 rounded-full ${c}`} />
+                  ))}
+                </div>
+              )}
+              {inRange && dots.length === 0 && (
+                <span className="w-1.5 h-1.5 rounded-full bg-stone-200" />
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* legend */}
+      <div className="px-4 pb-4 flex flex-wrap gap-4 text-xs text-stone-500 border-t border-stone-100 pt-3">
+        <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-white border border-stone-200 inline-block" />Sem cobertura</span>
+        <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-amber-100 border border-amber-200 inline-block" />1 período</span>
+        <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-orange-200 border border-orange-300 inline-block" />2 períodos</span>
+        <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-amber-500 inline-block" />3 períodos</span>
+      </div>
+    </div>
+  );
+}
+
+// ─── Existing Components ──────────────────────────────────────────────────────
 
 const ClockFace = memo(function ClockFace({ hourCounts, onHour, hi }) {
   const cx = 175, cy = 175, oR = 150, iR = 68, lR = 109;
@@ -232,6 +359,8 @@ function StatCard({ label, value, gradient, Icon }) {
   );
 }
 
+// ─── App ──────────────────────────────────────────────────────────────────────
+
 export default function App() {
   const [tab, setTab] = useState("calendar");
   const [month, setMonth] = useState(0);
@@ -242,6 +371,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const hourRefs = useRef({});
   const hiTimerRef = useRef(null);
+  const calendarSectionRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -313,6 +443,18 @@ export default function App() {
 
   const setHourRef = useCallback((h) => (el) => { hourRefs.current[h] = el; }, []);
 
+  // When user clicks a day in the calendar overview, jump to that month's cards
+  const handleCalendarDayClick = useCallback((date, monthIdx) => {
+    setTab("calendar");
+    setMonth(monthIdx);
+    setTimeout(() => {
+      const dKey = fmt(date);
+      const el = document.getElementById(`day-${dKey}`);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+      else if (calendarSectionRef.current) calendarSectionRef.current.scrollIntoView({ behavior: "smooth" });
+    }, 100);
+  }, []);
+
   const monthDays = useMemo(() => ALL_DAYS.filter(d => d.getMonth() === MONTHS[month].idx), [month]);
   const ckDay = CLOCK_DAYS[clockDay];
   const ckKey = ckDay ? fmt(ckDay) : "";
@@ -338,6 +480,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-stone-50 via-amber-50/30 to-stone-50">
+      {/* ── Header ── */}
       <header className="relative overflow-hidden bg-gradient-to-br from-stone-900 via-stone-800 to-amber-950 text-stone-100">
         <div className="absolute inset-0 opacity-10" style={{ backgroundImage: "radial-gradient(circle at 20% 20%,#f59e0b,transparent 50%),radial-gradient(circle at 80% 80%,#ea580c,transparent 50%)" }} />
         <div className="relative max-w-5xl mx-auto px-6 py-14 text-center">
@@ -345,7 +488,7 @@ export default function App() {
             <Flame className="w-3.5 h-3.5" />RUAH 2026
           </div>
           <h1 className="font-serif text-4xl md:text-6xl font-bold tracking-tight mb-2">Jejum & Oração</h1>
-          <p className="text-amber-200/80 text-sm tracking-wider uppercase mb-8">16 de Maio — 19 de Setembro de 2026</p>
+          <p className="text-amber-200/80 text-sm tracking-wider uppercase mb-8">16 de Maio — 03 de Outubro de 2026</p>
           <div className="max-w-3xl mx-auto bg-stone-100/5 border border-amber-400/20 rounded-2xl p-5 md:p-7">
             <div className="flex items-center justify-center gap-2 text-amber-300/80 text-xs tracking-widest uppercase mb-3">
               <BookOpen className="w-3.5 h-3.5" />Versículo tema · Malaquias 4:6
@@ -357,6 +500,7 @@ export default function App() {
         </div>
       </header>
 
+      {/* ── Info cards ── */}
       <section className="max-w-5xl mx-auto px-6 py-10">
         <div className="grid md:grid-cols-2 gap-5">
           <div className="bg-white border border-stone-200 rounded-2xl p-6 shadow-sm">
@@ -367,7 +511,7 @@ export default function App() {
               <h2 className="font-serif text-xl font-bold text-stone-900">Por que orar e jejuar?</h2>
             </div>
             <p className="text-stone-700 leading-relaxed text-sm">
-              A <strong>oração e o jejum</strong> são primordiais para a santificação dos santos — o terreno onde Deus molda o coração e fortalece a fé. Jesus deu prioridade absoluta a essas duas práticas, retirando-Se sozinho aos montes para orar <em>(Lc 6:12; Mt 14:23)</em> antes de cada grande passo do Seu ministério.
+              A <strong>oração e o jejum</strong> são primordiais para a santificação dos santos, sendo o terreno onde Deus molda o coração e fortalece a fé de seus filhos. Jesus deu prioridade absoluta a essas duas práticas, retirando-Se aos montes para orar <em>(Lc 6:12; Mt 14:23)</em> e ensinando sobre a prática do jejum <em>(Mt 6:16-18)</em> antes de cada grande passo do Seu ministério.
             </p>
           </div>
           <div className="bg-white border border-stone-200 rounded-2xl p-6 shadow-sm">
@@ -403,6 +547,7 @@ export default function App() {
         </div>
       </section>
 
+      {/* ── Stats ── */}
       <section className="max-w-5xl mx-auto px-6 pb-8">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <StatCard label="Total de intercessores" value={stats.total} gradient="from-amber-500 to-amber-600" Icon={Users} />
@@ -412,7 +557,24 @@ export default function App() {
         </div>
       </section>
 
-      <section className="max-w-5xl mx-auto px-6 pb-6">
+      {/* ── Calendar Overview ── */}
+      <section className="max-w-5xl mx-auto px-6 pb-8">
+        <div className="mb-3 flex items-center gap-2">
+          <Calendar className="w-4 h-4 text-amber-600" />
+          <h2 className="font-serif text-base font-bold text-stone-900">Visão geral do calendário</h2>
+          <span className="text-xs text-stone-400 ml-1">Clique em um dia para ir direto à inscrição</span>
+        </div>
+        {loading ? (
+          <div className="bg-white border border-stone-200 rounded-2xl p-10 flex items-center justify-center text-stone-400 text-sm shadow-sm">
+            <Loader2 className="w-5 h-5 animate-spin mr-2" />Carregando...
+          </div>
+        ) : (
+          <CalendarOverview signups={signups} onSelectDay={handleCalendarDayClick} />
+        )}
+      </section>
+
+      {/* ── Tab bar ── */}
+      <section className="max-w-5xl mx-auto px-6 pb-6" ref={calendarSectionRef}>
         <div className="bg-white border border-stone-200 rounded-2xl p-2 shadow-sm overflow-x-auto">
           <div className="flex items-center gap-1 min-w-max">
             {MONTHS.map((m, i) => (
@@ -432,6 +594,7 @@ export default function App() {
         </div>
       </section>
 
+      {/* ── Main content ── */}
       <section className="max-w-5xl mx-auto px-6 pb-16">
         {loading ? (
           <div className="flex items-center justify-center py-20 text-stone-500">
@@ -442,11 +605,13 @@ export default function App() {
             {monthDays.map(day => {
               const dKey = fmt(day);
               return (
-                <DayCard key={dKey} day={day} dKey={dKey}
-                  manhaNames={getCalNames(dKey, "manha")}
-                  tardeNames={getCalNames(dKey, "tarde")}
-                  noiteNames={getCalNames(dKey, "noite")}
-                  onAdd={addCal} onRemove={handleRemove} />
+                <div id={`day-${dKey}`} key={dKey}>
+                  <DayCard day={day} dKey={dKey}
+                    manhaNames={getCalNames(dKey, "manha")}
+                    tardeNames={getCalNames(dKey, "tarde")}
+                    noiteNames={getCalNames(dKey, "noite")}
+                    onAdd={addCal} onRemove={handleRemove} />
+                </div>
               );
             })}
           </div>
